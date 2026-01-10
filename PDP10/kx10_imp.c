@@ -862,6 +862,19 @@ static void check_interrupts (UNIT *uptr)
 {
     clr_interrupt (DEVNUM);
 
+    if (GET_DTYPE(uptr->flags) == TYPE_BBN) {
+        /* BBN interface: three independent PI assignments, input word
+           ready, end of input, and ready for next output word.  A
+           request with no channel assigned stays pending. */
+        if ((uptr->STATUS & IMPID) && (imp_data.pia & 07))
+            set_interrupt(DEVNUM, imp_data.pia & 07);
+        if ((uptr->STATUS & IMPLW) && ((imp_data.pia >> 6) & 07))
+            set_interrupt(DEVNUM, (imp_data.pia >> 6) & 07);
+        if ((uptr->STATUS & IMPOD) && ((imp_data.pia >> 3) & 07))
+            set_interrupt(DEVNUM, (imp_data.pia >> 3) & 07);
+        return;
+    }
+
     if ((uptr->STATUS & (IMPERR | IMPIC)) == IMPERR)
         set_interrupt(DEVNUM, imp_data.pia >> 6);
     if ((uptr->STATUS & (IMPR | IMPIC)) == (IMPR | IMPIC))
@@ -934,6 +947,63 @@ t_stat imp_devio(uint32 dev, uint64 *data)
              check_interrupts(uptr);
              break;
         case TYPE_BBN:
+             /* The BBN interface as TENEX drives it (IMPDV.MAC):
+                one 36-bit word per DATAO/DATAI, message boundaries
+                signalled by CONO "end of output" and CONI "end of
+                input". */
+             if (*data & IMP_RST) {
+                 uptr->STATUS &= ~(IMPID|IMPLW|IMPOD|IMPOB|IMPLHW|IMPERR);
+                 imp_data.pia = 0;
+             }
+             if (*data & IMP_EN_IN) {
+                 imp_data.pia &= ~07;
+                 imp_data.pia |= *data & 07;
+             }
+             if (*data & IMP_EN_OUT) {
+                 imp_data.pia &= ~070;
+                 imp_data.pia |= (*data >> 1) & 070;
+             }
+             if (*data & IMP_EN_END) {
+                 imp_data.pia &= ~0700;
+                 imp_data.pia |= (*data >> 2) & 0700;
+             }
+             if (*data & IMP_END_IN)     /* Clear end of input. */
+                 uptr->STATUS &= ~IMPLW;
+             if (*data & IMP_STOP)       /* Stop output: drop the request. */
+                 uptr->STATUS &= ~IMPOD;
+             if (*data & IMP_END_OUT) {  /* End of output: send message. */
+                 if (uptr->STATUS & IMPOB) {
+                     uptr->STATUS |= IMPLHW;   /* Last word still on its way. */
+                 } else {
+                     imp_send_packet (&imp_data, (uptr->OPOS + 7) >> 3);
+                     memset(imp_data.sbuffer, 0, ETH_FRAME_SIZE);
+                     uptr->OPOS = 0;
+                     uptr->STATUS |= IMPOD;    /* Ready for the next message. */
+                 }
+             }
+             /* The ready line is a level; TENEX repeats these CONOs many
+                times a second, so the IMP is only told of a change. */
+             if (*data & IMP_PDP_DN) {   /* Host ready line down. */
+                 if ((uptr->STATUS & IMPHR) && (uptr->flags & UNIT_NCP)) {
+                     uint16 flags = 0;
+                     (void)udp_send (dptr, imp_data.link, &flags, 1);
+                 }
+                 uptr->STATUS &= ~IMPHR;
+                 /* A host that is down takes no input.  Dropping what is
+                    pending also lets the interface go on watching the
+                    IMP's ready line, which arrives with its messages. */
+                 uptr->STATUS &= ~(IMPID|IMPLW|IMPIB);
+                 uptr->ILEN = 0;
+                 imp_data.rpos = 0;
+             }
+             if (*data & IMP_CLR) {      /* Host ready, clear error. */
+                 uptr->STATUS &= ~IMPERR;
+                 if ((uptr->STATUS & IMPHR) == 0 && (uptr->flags & UNIT_NCP))
+                     imp_send_host_ready(dptr, &imp_data);
+                 uptr->STATUS |= IMPHR;
+             }
+             check_interrupts(uptr);
+             break;
         case TYPE_WAITS:
              if (*data & IMP_ODPIEN) {
                  imp_data.pia &= ~07;
@@ -985,6 +1055,22 @@ t_stat imp_devio(uint32 dev, uint64 *data)
              *data = (uint64)(uptr->STATUS | (imp_data.pia & 07));
              break;
         case TYPE_BBN:
+             /* Channel assignments read back next to their flags. */
+             *data = (uint64)((imp_data.pia & 07) | ((imp_data.pia & 070) << 1) |
+                              ((imp_data.pia & 0700) << 2));
+             if (uptr->STATUS & IMPID)
+                 *data |= IMP_IFULL;
+             if (uptr->STATUS & IMPOD)
+                 *data |= IMP_OEMPY;
+             if (uptr->STATUS & IMPLW)
+                 *data |= IMP_EN_END;      /* End of input, 1B24. */
+             if ((uptr->flags & UNIT_ATT) == 0 || (uptr->STATUS & IMPR) == 0)
+                 *data |= IMP_DN;
+             if (uptr->STATUS & IMPERR)
+                 *data |= IMP_WAS_DN;
+             if (uptr->flags & UNIT_ATT)
+                 *data |= IMP_PWR;
+             break;
         case TYPE_WAITS:
              *data = (uint64)(imp_data.pia & 0777);
              if (uptr->STATUS & IMPOD)
@@ -1013,7 +1099,10 @@ t_stat imp_devio(uint32 dev, uint64 *data)
         break;
     case DATAI:
         *data = imp_data.ibuf;
-        uptr->STATUS &= ~(IMPID|IMPLW);
+        if (GET_DTYPE(uptr->flags) == TYPE_BBN)
+            uptr->STATUS &= ~IMPID;          /* End of input waits for CONO. */
+        else
+            uptr->STATUS &= ~(IMPID|IMPLW);
         sim_debug(DEBUG_DATAIO, dptr, "IMP %03o DATI %012llo %08x PC=%o\n",
                  dev, *data, (uint32)(*data >> 4), PC);
         if (uptr->ILEN != 0)
@@ -1216,7 +1305,7 @@ t_stat imp_srv(UNIT * uptr)
             uptr->OPOS++;
         }
         if (uptr->STATUS & IMPLHW) {
-            imp_send_packet (&imp_data, uptr->OPOS >> 3);
+            imp_send_packet (&imp_data, (uptr->OPOS + 7) >> 3);
             /* Allow room for ethernet header for later */
             memset(imp_data.sbuffer, 0, ETH_FRAME_SIZE);
             uptr->OPOS = 0;
@@ -1227,7 +1316,9 @@ t_stat imp_srv(UNIT * uptr)
         check_interrupts (uptr);
     }
     if (uptr->STATUS & IMPIB) {
-        uptr->STATUS &= ~(IMPIB|IMPLW);
+        uptr->STATUS &= ~IMPIB;
+        if (GET_DTYPE(uptr->flags) != TYPE_BBN)
+            uptr->STATUS &= ~IMPLW;
         imp_data.ibuf = 0;
         l = (uptr->STATUS & IMPI32) ? 4 : 0;
         for (i = 35; i >= l; i--) {
@@ -1244,8 +1335,16 @@ t_stat imp_srv(UNIT * uptr)
         check_interrupts (uptr);
     }
 #endif
-    if (uptr->ILEN == 0 && (uptr->STATUS & (IMPIB|IMPID)) == 0)
+    /* The BBN interface holds the next message off until the end of the
+       last one has been acknowledged. */
+    if (uptr->ILEN == 0 && (uptr->STATUS & (IMPIB|IMPID)) == 0 &&
+        !(GET_DTYPE(uptr->flags) == TYPE_BBN && (uptr->STATUS & IMPLW)))
         imp_packet_in(&imp_data);
+    /* Nothing else looks for messages from the IMP emulator while the
+       host is idle. */
+    if ((uptr->flags & (UNIT_NCP|UNIT_ATT)) == (UNIT_NCP|UNIT_ATT) &&
+        !sim_is_active(uptr))
+        sim_activate(uptr, 1000);
     return SCPE_OK;
 }
 
@@ -1423,8 +1522,12 @@ imp_receive_udp (DEVICE *dev, struct imp_device *imp)
         return;
     if (data[0] & PFLG_READY)
         imp_unit[0].STATUS |= IMPR;
-    else
+    else {
+        /* The BBN interface remembers that the IMP's ready line dropped. */
+        if (GET_DTYPE(imp_unit[0].flags) == TYPE_BBN && (imp_unit[0].STATUS & IMPR))
+            imp_unit[0].STATUS |= IMPERR;
         imp_unit[0].STATUS &= ~IMPR;
+    }
     for (i = 1; i < count; i++) {
         imp->rbuffer[imp->rpos++] = data[i] >> 8;
         imp->rbuffer[imp->rpos++] = data[i] & 0xFF;
@@ -3252,6 +3355,7 @@ t_stat imp_attach(UNIT* uptr, CONST char* cptr)
     if (uptr->flags & UNIT_NCP) {
         /* Don't do the Ethernet stuff below. */
         uptr->flags |= UNIT_ATT;
+        sim_activate(uptr, 1000);        /* Start looking for messages. */
         return SCPE_OK;
     }
 
