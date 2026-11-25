@@ -348,7 +348,9 @@ int32 ln;
     }
 
     /* If any pending status request, raise the PI signal */
-    if (dc_l_status)
+    if (dc_l_status && (uptr->STATUS & (RCV_PI|XMT_PI)) == 0)
+        dc_doscan(uptr);
+    else if (dc_l_status)
         set_interrupt(DC_DEVNUM, uptr->STATUS);
     sim_clock_coschedule(uptr, tmxr_poll);              /* continue poll */
     return SCPE_OK;
@@ -357,10 +359,12 @@ int32 ln;
 /* Scan to see if something to do */
 t_stat dc_doscan (UNIT *uptr) {
    int32 lmask;
+   int   n;
 
    uptr->STATUS &= ~(RCV_PI|XMT_PI);
    clr_interrupt(DC_DEVNUM);
-   for (;dc_l_status != 0; dc_l_count++) {
+   /* Go round the lines once, starting where the scanner stands. */
+   for (n = 0; dc_l_status != 0 && n < 64; n++, dc_l_count++) {
       dc_l_count &= 077;
       /* Check if we found it */
       if (dc_l_status & (1LL << dc_l_count)) {
@@ -374,6 +378,12 @@ t_stat dc_doscan (UNIT *uptr) {
                 uptr->STATUS |= RCV_PI;
             if (tx_enable & lmask)
                 uptr->STATUS |= XMT_PI;
+            /* A line that is still sending has nothing to report yet:
+               interrupting for it with neither flag up gives the monitor
+               an interrupt it cannot find a reason for.  The poll will
+               raise its transmit flag when the character is out. */
+            if ((uptr->STATUS & (RCV_PI|XMT_PI)) == 0)
+                continue;
          }
          /* Stop scanner */
          set_interrupt(DC_DEVNUM, uptr->STATUS);
