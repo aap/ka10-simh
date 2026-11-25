@@ -126,6 +126,7 @@ static uint64 tf_coni;
 static uint64 tf_cono;
 static uint64 tf_drive;
 static uint64 tf_cmd[8];     /* DATAO word of the operation in progress. */
+static int tf_irq;           /* PI request flop. */
 static uint64 tf_buf[SECTOR_SIZE];
 static struct df10 tf_df10;
 
@@ -180,8 +181,12 @@ DEVICE tf_dev = {
 
 static t_stat tf_check_interrupt(const char *place)
 {
-  if ((tf_cono & CONO_PIA) != 0 &&
-      (tf_coni & CONI_INT) != 0 &&
+  /* The request is a flop of its own: the status bits (done, attention)
+     stay up after the interrupt has been taken, and the TENEX driver's
+     service routine only ever reads the status before dismissing.  The
+     KA10 I/O bus has no interrupt acknowledge, so reading the status is
+     taken to be what drops the request. */
+  if ((tf_cono & CONO_PIA) != 0 && tf_irq &&
       (tf_coni & CONI_CBUSY) == 0) {
       sim_debug(DEBUG_IRQ, &tf_dev, "Interrupt from %s due to %03llo.\n",
                 place, tf_coni & CONI_INT);
@@ -190,6 +195,7 @@ static t_stat tf_check_interrupt(const char *place)
       sim_debug(DEBUG_IRQ, &tf_dev, "Interrupt off.\n");
       clr_interrupt(TF_DEVNUM);
   }
+  return SCPE_OK;
 }
 
 static t_stat tf_devio(uint32 dev, uint64 *data) {
@@ -214,6 +220,10 @@ static t_stat tf_devio(uint32 dev, uint64 *data) {
         }
         sim_debug(DEBUG_CONI, &tf_dev, "%012llo drive %lld PC=%06o\n",
                   *data, tf_drive, PC);
+        if (tf_irq) {
+            tf_irq = 0;
+            tf_check_interrupt("CONI");
+        }
         break;
 
     case CONO:
@@ -243,6 +253,7 @@ static t_stat tf_devio(uint32 dev, uint64 *data) {
         uptr = &tf_unit[tf_drive];
         tf_coni &= ~CONI_DONE;
         tf_coni &= ~(1ULL << tf_drive);
+        tf_irq = 0;
         tf_cmd[tf_drive] = *data;
         uptr->u3 = *data & DATAO_COMMAND;
         switch (uptr->u3) {
@@ -372,6 +383,7 @@ t_stat tf_svc (UNIT *uptr)
         break;
     }
 
+    tf_irq = 1;
     tf_check_interrupt("tf_svc");
     return SCPE_OK;
 }
