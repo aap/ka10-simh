@@ -3714,7 +3714,9 @@ int page_lookup_bbn(t_addr addr, int flag, t_addr *loc, int wr, int cur_context,
     int      uf = (FLAGS & USER) != 0;
     int      map = page;
     int      match;
-    int      exj = (xct_flag != 0) && ((FLAGS & EXJSYS) != 0);
+    /* UMOVE, UMOVEI, UMOVEM, UMOVES reference the previous context. */
+    int      umove = !fetch && (IR & 0774) == 0100;
+    int      prev = 0;
 
     if (page_fault)
         return 0;
@@ -3728,10 +3730,8 @@ int page_lookup_bbn(t_addr addr, int flag, t_addr *loc, int wr, int cur_context,
         return 1;
     }
 
-    /* Umove instructions handled here */
-    if (!fetch && (IR & 0774) == 0100 && (FLAGS & EXJSYS) == 0)
-        uf = 1;
-    /* Figure out if this is a user space access */
+    /* Figure out if this reference is to the previous context: UMOVE
+       class, or selected by the bits of an XCT. */
     if (flag)
         uf = 0;
     else if (fetch)
@@ -3743,23 +3743,35 @@ int page_lookup_bbn(t_addr addr, int flag, t_addr *loc, int wr, int cur_context,
             uf = 1;
         if (xct_flag & 001 && (wr == 1 || BYF5))  /* XW or XLB or XDB */
             uf = 1;
-    } else if ((FLAGS & EXJSYS) == 0) {
-        /* TENEX: access user space unless coming from a monitor JSYS call. */
+    } else {
+        if (umove)
+            prev = 1;
         if (xct_flag & 010 && cur_context)
-            uf = 1;
+            prev = 1;
         if (xct_flag & 004 && wr == 0)
-            uf = 1;
+            prev = 1;
         if (xct_flag & 002 && BYF5)
-            uf = 1;
+            prev = 1;
         if (xct_flag & 001 && wr == 1)
+            prev = 1;
+        /* TENEX: the previous context is user space, unless the JSYS
+           was called from the monitor.  Then memory stays in monitor
+           space, but the accumulators are still the caller's, kept in
+           the current AC block. */
+        if (prev && (FLAGS & EXJSYS) == 0)
             uf = 1;
     }
 
     /* If not really user mode and register access */
-    if (addr < 020 && (uf || exj) && (FLAGS & USER) == 0) {
+    if (addr < 020 && (uf || prev) && (FLAGS & USER) == 0) {
         if (QWAITS)
            goto lookup;
+        /* The saved accumulators are in page 775 of the monitor map,
+           and that page goes through the map like any other.  TENEX
+           maps it to the PSB (UACPG). */
         addr |= 0775000 | ac_stack;
+        page = addr >> 9;
+        map = page;
         uf = 0;
     }
 
@@ -3968,9 +3980,12 @@ fault_bbn:
  */
 int Mem_read_bbn(int flag, int cur_context, int fetch, int mod) {
     t_addr addr;
+    /* UMOVE class from monitor mode: accumulators are the caller's. */
+    int umove = !fetch && !flag && page_enable &&
+                (IR & 0774) == 0100 && (FLAGS & USER) == 0;
 
     /* If not doing any special access, just access register */
-    if (AB < 020 && ((xct_flag == 0 || fetch || cur_context || (FLAGS & USER) != 0))) {
+    if (AB < 020 && !umove && ((xct_flag == 0 || fetch || cur_context || (FLAGS & USER) != 0))) {
         MB = get_reg(AB);
         if (fetch == 0 && hst_lnt) {
             hst[hst_p].mb = MB;
@@ -4013,9 +4028,11 @@ int Mem_read_bbn(int flag, int cur_context, int fetch, int mod) {
  */
 int Mem_write_bbn(int flag, int cur_context) {
     t_addr addr;
+    int umove = !cur_context && !flag && page_enable &&
+                (IR & 0774) == 0100 && (FLAGS & USER) == 0;
 
     /* If not doing any special access, just access register */
-    if (AB < 020 && ((xct_flag == 0 || cur_context || (FLAGS & USER) != 0))) {
+    if (AB < 020 && !umove && ((xct_flag == 0 || cur_context || (FLAGS & USER) != 0))) {
         set_reg(AB, MB);
         UPDATE_MI(AB);
         return 0;
