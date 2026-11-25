@@ -6438,8 +6438,12 @@ dpnorm:
                    BR = ((uint64)(FLAGS) << 23) | ((PC + !pi_cycle) & RMASK);
                    if (AB < 01000) {
                       AB += 01000;
+                      /* CALL FROM MONITOR follows the mode the JSYS was
+                         executed in; the old state is in the saved flags. */
                       if ((FLAGS & USER) == 0)
                          FLAGS |= EXJSYS;
+                      else
+                         FLAGS &= ~EXJSYS;
                       FLAGS &= ~USER;
                    }
                    if (Mem_read(0, 0, 0, 0)) {
@@ -8845,6 +8849,12 @@ jrstf:
               if (AC & 02) {
                  FLAGS &= ~(OVR|NODIV|FLTUND|BYTI|FLTOVR|CRY1|CRY0|TRP1|TRP2|PCHNG|ADRFLT);
                  AR >>= 23; /* Move into position */
+#if BBN
+                 /* CALL FROM MONITOR is saved and restored with the other
+                    PC flags (Model 701 manual, 10.5.3). */
+                 if (QBBN && (FLAGS & USER) == 0)
+                    FLAGS = (FLAGS & ~EXJSYS) | ((uint32)AR & EXJSYS);
+#endif
                  /* If executive mode, copy USER and UIO */
                  if ((FLAGS & (PUBLIC|USER)) == 0)
                     FLAGS |= AR & (USER|USERIO|PUBLIC);
