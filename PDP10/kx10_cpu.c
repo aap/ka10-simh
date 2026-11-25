@@ -4018,6 +4018,17 @@ int Mem_write_bbn(int flag, int cur_context) {
         UPDATE_MI(AB);
         return 0;
     }
+    /* CONO PGR,2: the next write clears the associative register for
+       the page it addresses, and is not itself carried out. */
+    if (next_write) {
+        next_write = 0;
+        modify = 0;
+        sim_debug(DEBUG_PAGER, &cpu_dev, "Clear mapping of page %03o\n",
+                  AB >> 9);
+        e_tlb[AB >> 9] = 0;
+        u_tlb[AB >> 9] = 0;
+        return 0;
+    }
     if (modify) {
         if (sim_brk_summ && sim_brk_test(last_addr, SWMASK('W')))
             watch_stop = 1;
