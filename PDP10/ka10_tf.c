@@ -113,6 +113,7 @@ DSKWDA==6B22            ; .. WRITE
 static t_stat tf_check_interrupt(const char *place);
 static t_stat tf_devio(uint32 dev, uint64 *data);
 static t_stat tf_svc(UNIT *);
+static void tf_transfer(UNIT *, int);
 static t_stat tf_reset(DEVICE *);
 static t_stat tf_attach(UNIT *, CONST char *);
 static t_stat tf_detach(UNIT *);
@@ -124,6 +125,8 @@ static const char *tf_description (DEVICE *dptr);
 static uint64 tf_coni;
 static uint64 tf_cono;
 static uint64 tf_drive;
+static uint64 tf_cmd[8];     /* DATAO word of the operation in progress. */
+static uint64 tf_buf[SECTOR_SIZE];
 static struct df10 tf_df10;
 
 UNIT tf_unit[] = {
@@ -237,8 +240,10 @@ static t_stat tf_devio(uint32 dev, uint64 *data) {
             tf_drive = ((*data & CONO_UNIT) >> 9) - 1;
             sim_debug(DEBUG_CMD, &tf_dev, "Drive %llo\n", tf_drive);
         }
+        uptr = &tf_unit[tf_drive];
         tf_coni &= ~CONI_DONE;
         tf_coni &= ~(1ULL << tf_drive);
+        tf_cmd[tf_drive] = *data;
         uptr->u3 = *data & DATAO_COMMAND;
         switch (uptr->u3) {
         case DATAO_CAL:
@@ -261,8 +266,6 @@ static t_stat tf_devio(uint32 dev, uint64 *data) {
             sim_debug(DEBUG_CMD, &tf_dev, "DF10 address %06o, "
                       "control %06llo,,%06llo\n",
                       addr, word >> 18, word & 0777777);
-            //df10_setup(&tf_df10, addr);
-            //tf_coni &= ~CONI_CBUSY;
             sim_activate(&tf_unit[tf_drive], 100);
             break;
         case DATAO_WRITE:
@@ -274,8 +277,6 @@ static t_stat tf_devio(uint32 dev, uint64 *data) {
             sim_debug(DEBUG_CMD, &tf_dev, "DF10 address %06o, "
                       "control %06llo,,%06llo\n",
                       addr, word >> 18, word & 0777777);
-            //df10_setup(&tf_df10, addr);
-            //tf_coni &= ~CONI_CBUSY;
             sim_activate(&tf_unit[tf_drive], 100);
             break;
         case DATAO_NOP:
@@ -292,6 +293,64 @@ static t_stat tf_devio(uint32 dev, uint64 *data) {
     return SCPE_OK;
 }
 
+/* Disk address in the DATAO word, as built by MKDC10 in the TENEX
+   driver: sector in bits 16-20, surface in bits 21-25, cylinder in
+   bits 26-33.  Bits 0-8 are the address of the initial DF10 control
+   word.  The image is a plain array of 64-bit words in cylinder,
+   surface, sector order. */
+static void tf_transfer(UNIT *uptr, int wr)
+{
+    uint64 cmd = tf_cmd[uptr - tf_unit];
+    uint32 sec = (uint32)(cmd >> 16) & 037;
+    uint32 surf = (uint32)(cmd >> 21) & 037;
+    uint32 cyl = (uint32)(cmd >> 26) & 0377;
+    t_addr da = ((cyl * SURFACES + surf) * SECTORS + sec) * SECTOR_SIZE;
+    int n = 0, i = 0, more;
+
+    sim_debug(DEBUG_DETAIL, &tf_dev, "%s drive %ld cyl %o surf %o sec %o\n",
+              wr ? "Write" : "Read", (long)(uptr - tf_unit), cyl, surf, sec);
+
+    if ((uptr->flags & UNIT_ATT) == 0 || sec >= SECTORS ||
+        surf >= SURFACES || cyl >= CYLINDERS)
+        return;
+
+    df10_setup(&tf_df10, (uint32)(cmd & 0777));
+    if (!df10_fetch(&tf_df10))
+        return;
+
+    do {
+        if (da + SECTOR_SIZE > PACK_SIZE)
+            break;
+        if (i == 0) {
+            memset(tf_buf, 0, sizeof tf_buf);
+            (void)sim_fseek(uptr->fileref, da * sizeof(uint64), SEEK_SET);
+            if (!wr)
+                (void)sim_fread(tf_buf, sizeof(uint64), SECTOR_SIZE,
+                                uptr->fileref);
+        }
+        if (wr) {
+            more = df10_read(&tf_df10);
+            tf_buf[i] = tf_df10.buf;
+        } else {
+            tf_df10.buf = tf_buf[i];
+            more = df10_write(&tf_df10);
+        }
+        n++;
+        if (++i == SECTOR_SIZE || !more) {
+            /* A partly written sector is filled out with zeros. */
+            if (wr) {
+                (void)sim_fseek(uptr->fileref, da * sizeof(uint64), SEEK_SET);
+                (void)sim_fwrite(tf_buf, sizeof(uint64), SECTOR_SIZE,
+                                 uptr->fileref);
+            }
+            da += SECTOR_SIZE;
+            i = 0;
+        }
+    } while (more);
+
+    sim_debug(DEBUG_DETAIL, &tf_dev, "Transferred %d words\n", n);
+}
+
 t_stat tf_svc (UNIT *uptr)
 {
     tf_coni &= ~CONI_CBUSY;
@@ -306,6 +365,7 @@ t_stat tf_svc (UNIT *uptr)
         break;
     case DATAO_READ:
     case DATAO_WRITE:
+        tf_transfer(uptr, uptr->u3 == DATAO_WRITE);
         tf_coni |= CONI_DONE;
         sim_debug(DEBUG_IRQ, &tf_dev, "Drive %ld read/write done.\n",
                   uptr - tf_unit);
