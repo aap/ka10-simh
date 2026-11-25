@@ -8504,6 +8504,15 @@ mul_done:
                        if (QITS)
                            set_reg(AC, AR);
 #endif
+#if BBN
+                       /* A pager trap leaves the pointer in the AC like an
+                          interrupt does, so the BLT resumes where it
+                          stopped; restarting an overlapping move from
+                          the beginning would copy what it has already
+                          overwritten. */
+                       if (QBBN)
+                           set_reg(AC, AR);
+#endif
 #else
                        set_reg(AC, AR);
 #endif
@@ -8527,6 +8536,15 @@ mul_done:
 #if KA | PDP6
 #if ITS
                        if (QITS)
+                           set_reg(AC, AR);
+#endif
+#if BBN
+                       /* A pager trap leaves the pointer in the AC like an
+                          interrupt does, so the BLT resumes where it
+                          stopped; restarting an overlapping move from
+                          the beginning would copy what it has already
+                          overwritten. */
+                       if (QBBN)
                            set_reg(AC, AR);
 #endif
 #else
