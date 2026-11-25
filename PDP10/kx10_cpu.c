@@ -3812,7 +3812,9 @@ access:
             sim_debug(DEBUG_PAGER, &cpu_dev, ", no execute\n");
             fault_data = 0404000;
             goto fault_bbn;
-        } else if ((tlb_data & 0400000) == 0) {
+        } else if (!fetch && !wr && (tlb_data & 0400000) == 0) {
+            /* Each kind of request needs only its own permit: a store
+               into a write-only page is legal. */
             sim_debug(DEBUG_PAGER, &cpu_dev, ", no access\n");
             fault_data = 0404000;
             goto fault_bbn;
