@@ -1665,7 +1665,9 @@ t_stat dev_pag(uint32 dev, uint64 *data) {
                  mon_base_reg = (res & 03777) << 9;
                  ac_stack = (res >> 9) & 0760;
                  user_base_reg = (res >> 9) & 03777000;
-                 user_limit = page_limit[(res >> 30) & 07];
+                 /* ALR is bits 4-6 of location 71 (Model 701 manual,
+                    figure 10-10). */
+                 user_limit = page_limit[(res >> 29) & 07];
                  sim_debug(DEBUG_PAGER, &cpu_dev,
                            "71: %llo, %07o, %07o\n",
                            res, mon_base_reg, user_base_reg);
