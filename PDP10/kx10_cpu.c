@@ -252,6 +252,7 @@ int     last_page;                            /* Last page mapped */
 #if BBN
 int     exec_map;                             /* Enable executive mapping */
 int     next_write;                           /* Clear next write mapping */
+int     bbn_bptr;                             /* Byte pointer access: 1 current, 2 previous context */
 int     mon_base_reg;                         /* Monitor base register */
 int     user_base_reg;                        /* User base register */
 int     user_limit;                           /* User limit register */
@@ -3747,16 +3748,27 @@ int page_lookup_bbn(t_addr addr, int flag, t_addr *loc, int wr, int cur_context,
         if (xct_flag & 001 && (wr == 1 || BYF5))  /* XW or XLB or XDB */
             uf = 1;
     } else {
-        if (umove)
-            prev = 1;
-        if (xct_flag & 010 && cur_context)
-            prev = 1;
-        if (xct_flag & 004 && wr == 0)
-            prev = 1;
-        if (xct_flag & 002 && BYF5)
-            prev = 1;
-        if (xct_flag & 001 && wr == 1)
-            prev = 1;
+        if (bbn_bptr) {
+            /* The pointer of a byte instruction: only the data fetch bit
+               of the XCT decides where it is, also for the store back. */
+            if (bbn_bptr == 2)
+                prev = 1;
+        } else {
+            if (umove)
+                prev = 1;
+            if (xct_flag & 010 && cur_context)
+                prev = 1;
+            if (xct_flag & 004 && wr == 0)
+                prev = 1;
+            if (xct_flag & 002 && BYF5)
+                prev = 1;
+            if (xct_flag & 001 && wr == 1)
+                prev = 1;
+            /* The byte itself, fetched or stored, goes with the data store
+               bit (Model 701 manual, figure 10-8). */
+            if (xct_flag & 001 && BYF5 && !cur_context)
+                prev = 1;
+        }
         /* TENEX: the previous context is user space, unless the JSYS
            was called from the monitor.  Then memory stays in monitor
            space, but the accumulators are still the caller's, kept in
@@ -4564,6 +4576,21 @@ int nlzero(uint64 w) {
     if ((w & 00600000000000LL) == 0) { n ++;    w <<= 1;  }
     if ((w & 00400000000000LL) == 0) { n ++; }
     return n;
+}
+
+/*
+ * Fetch a byte pointer.  On the BBN pager the pointer is fetched from the
+ * previous context when the "data fetch, byte pointer fetch" bit of the
+ * XCT is set (Model 701 manual, figure 10-8); otherwise it is the current
+ * context, as on other KA10 systems.
+ */
+#define BBN_BPTR_PREV   (QBBN && (xct_flag & 04) != 0 && (FLAGS & USER) == 0)
+static int bbn_bptr_read(int mod) {
+    int r;
+    bbn_bptr = BBN_BPTR_PREV ? 2 : (QBBN ? 1 : 0);
+    r = Mem_read(0, !QITS && bbn_bptr != 2, 0, mod);
+    bbn_bptr = 0;
+    return r;
 }
 
 t_stat sim_instr (void)
@@ -6703,7 +6730,7 @@ unasign:
 #elif KI
                   if (Mem_read(0, 1, 0, 1)) {
 #else
-                  if (Mem_read(0, !QITS, 0, 1)) {
+                  if (bbn_bptr_read(1)) {
 #endif
 #if PDP6
                       FLAGS |= BYTI;
@@ -6784,7 +6811,7 @@ unasign:
 #elif KI
                   if (Mem_write(0, 1))
 #else
-                  if (Mem_write(0, !QITS))
+                  if (Mem_write(0, !QITS && !BBN_BPTR_PREV))
 #endif
                       goto last;
                   if ((IR & 04) == 0)
@@ -6801,7 +6828,7 @@ unasign:
 #elif KI
                   if (Mem_read(0, 1, 0, 0))
 #else
-                  if (Mem_read(0, !QITS, 0, 0))
+                  if (bbn_bptr_read(0))
 #endif
                       goto last;
                   AR = MB;
