@@ -13887,11 +13887,12 @@ t_stat cpu_dep (t_value val, t_addr ea, UNIT *uptr, int32 sw)
 if (ea < 020)
     FM[ea] = val & FMASK;
 else {
-#if KL | KI | KS
+#if KL | KI | KS | BBN
     if (sw & SWMASK ('V')) {
         int uf = ((sw & SWMASK('U')) != 0);
         int page = ea >> 9;
         uint32  tlb;
+#if !BBN
 #if KL | KS
         if (!uf && !t20_page && (page & 0740) == 0340) {
 #else
@@ -13901,6 +13902,7 @@ else {
              page += 01000 - 0340;
              uf = 1;
         }
+#endif
         if (uf)
            tlb = u_tlb[page];
         else
