@@ -4680,8 +4680,15 @@ fetch:
         if (Mem_read(pi_cycle | uuo_cycle, 1, 1, 0)) {
 #if KA | PDP6
             pi_rq = check_irq_level();
-            if (pi_rq)
+            if (pi_rq) {
+#if BBN
+               /* The interrupt is taken instead of the pager trap; the
+                  fetch will fault again afterwards.  Left set, the fault
+                  would make every reference of the interrupt fail. */
+               page_fault = 0;
+#endif
                goto st_pi;
+            }
 #endif
 #if KL
             /* Handling for PUBLIC violation */
