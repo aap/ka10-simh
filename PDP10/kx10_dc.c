@@ -255,6 +255,13 @@ t_stat dc_devio(uint32 dev, uint64 *data) {
                 else
                     tx_enable &= ~(1 << ln);
                 dc_l_status |= (1LL << ln);
+             } else {
+                /* Nobody is listening on this line.  The scanner still
+                   shifts the character out and raises the transmit
+                   flag; without that a monitor that broadcasts to all
+                   lines waits out a timeout for every character. */
+                tx_enable |= (1 << ln);
+                dc_l_status |= (1LL << ln);
              }
          }
          dc_doscan(uptr);
