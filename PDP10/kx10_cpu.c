@@ -12142,6 +12142,9 @@ last:
     if (QBBN && page_fault) {
         sim_debug(DEBUG_PAGER, &cpu_dev, "Trap\n");
         page_fault = 0;
+        /* The trap instruction is not part of the XCT that faulted. */
+        xct_flag = 0;
+        BYF5 = 0;
         AB = 070 + maoff;
         f_pc_inh = 1;
         pi_cycle = 1;
