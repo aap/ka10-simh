@@ -3717,6 +3717,9 @@ int page_lookup_bbn(t_addr addr, int flag, t_addr *loc, int wr, int cur_context,
     /* UMOVE, UMOVEI, UMOVEM, UMOVES reference the previous context. */
     int      umove = !fetch && (IR & 0774) == 0100;
     int      prev = 0;
+    int      grp, after = 0;
+    uint64   cst, spt;
+    uint32   acc;
 
     if (page_fault)
         return 0;
@@ -3811,16 +3814,15 @@ lookup:
         sim_interval--;
         tlb_data = e_tlb[page];
     }
-    if (tlb_data != 0) {
-access:
+    /* An associative register only matches when the kind of request is
+       permitted.  A register loaded by a read of an unmodified page has
+       no write permit, so the first write goes through the loading
+       sequence again and gets recorded in the core status table. */
+    if (tlb_data != 0 && !(wr && (tlb_data & 0200000) == 0)) {
         sim_debug(DEBUG_PAGER, &cpu_dev, "Map hit");
         *loc = ((tlb_data & 03777) << 9) + (addr & 0777);
         /* Check access */
-        if (wr && (tlb_data & 0200000) == 0) {
-            sim_debug(DEBUG_PAGER, &cpu_dev, ", no write\n");
-            fault_data = 0402000;
-            goto fault_bbn;
-        } else if (fetch && (tlb_data & 0100000) == 0) {
+        if (fetch && (tlb_data & 0100000) == 0) {
             sim_debug(DEBUG_PAGER, &cpu_dev, ", no execute\n");
             fault_data = 0404000;
             goto fault_bbn;
@@ -3835,106 +3837,134 @@ access:
         return 1;
     }
     sim_debug(DEBUG_PAGER, &cpu_dev, "Pager map miss\n");
-    traps = FMASK;
-    /* Map the page */
-    match = 0;
-    while (!match) {
+
+    /* Self-loading sequence, after "Technical Details of the BBN Pager
+       Model 701", July 1970.  Access permissions are the AND of all
+       page table entries on the way; directed traps are taken as each
+       entry is read, before anything is loaded. */
+    acc = 0700000;
+    tlb_data = 0;
+    for (;;) {
         sim_interval--;
         data = M[base + map];
         sim_debug(DEBUG_PAGER, &cpu_dev, "map %04o data %012llo\n",
                   map, data);
+        /* Trap group 2 for the first page table, 3 for later ones. */
+        grp = (lvl != 0) ? 0600000 : 0400000;
 
-        switch ((data >> 34) & 03) {
-        case 0:      /* Direct page */
-             sim_debug(DEBUG_PAGER, &cpu_dev, "Direct\n");
-             /* Bit 4 = execute */
-             /* Bit 3 = Write */
-             /* Bit 2 = Read */
-             traps &= data & (BBN_MERGE|BBN_TRPPG);
-             tlb_data = (uint32)(((data & (BBN_EXEC|BBN_WRITE|BBN_READ)) >> 16) |
-                         (data & 03777));
-             match = 1;
-             break;
-
-        case 1:      /* Shared page */
-             sim_debug(DEBUG_PAGER, &cpu_dev, "Shared\n");
-             /* Check trap */
-             base = 020000;
-             map = (data & BBN_SPT) >> 9;
-             traps &= data & (BBN_MERGE|BBN_PAGE);
-             tlb_data = (uint32)((data & (BBN_EXEC|BBN_WRITE|BBN_READ)) >> 16);
-             lvl ++;
-        data = M[base + map];
-        sim_debug(DEBUG_PAGER, &cpu_dev, "map %04o data %012llo\n",
-                  map, data);
-             tlb_data |= (uint32)(data & 03777);
-             match = 1;
-             break;
-
-        case 2:      /* Indirect page */
-             sim_debug(DEBUG_PAGER, &cpu_dev, "Indirect\n");
-             if (lvl == 2) {
-                 /* Trap */
-                 fault_data =  0201000;
-                 goto fault_bbn;
-             }
-             map = data & BBN_PN;
-             base = 020000 + ((data & BBN_SPT) >> 9);
-             traps &= data & (BBN_MERGE|BBN_PAGE);
-             data = 0;
-             lvl ++;
-             break;
-
-        case 3:      /* Invalid page */
-             sim_debug(DEBUG_PAGER, &cpu_dev, "Invalid\n");
-             /* Trap all  */
-             fault_data = ((lvl != 0)? 0200000: 0)  | 0401000;
-             goto fault_bbn;
+        if (((data >> 34) & 03) == 3) {
+            sim_debug(DEBUG_PAGER, &cpu_dev, "Invalid\n");
+            fault_data = grp | 0001000;
+            goto fault_bbn;
         }
-        if ((traps & (BBN_TRP|BBN_TRP1)) == (BBN_TRP|BBN_TRP1)) {
-           sim_debug(DEBUG_PAGER, &cpu_dev, "TRP|TRP1\n");
-           fault_data = 04000;
-           goto fault_bbn;
+        if (wr && (data & BBN_TRPMOD)) {
+            sim_debug(DEBUG_PAGER, &cpu_dev, "Write copy trap\n");
+            fault_data = grp | 0040000;
+            goto fault_bbn;
         }
+        if (data & BBN_TRPUSR) {
+            sim_debug(DEBUG_PAGER, &cpu_dev, "User trap\n");
+            fault_data = grp | 0020000;
+            goto fault_bbn;
+        }
+        if ((data & BBN_ACC) == 0 ||
+            (data & (BBN_TRP|BBN_TRP1)) == (BBN_TRP|BBN_TRP1)) {
+            sim_debug(DEBUG_PAGER, &cpu_dev, "Access trap\n");
+            fault_data = grp | 0010000;
+            goto fault_bbn;
+        }
+        if ((data & (BBN_TRP|BBN_TRP1)) == BBN_TRP)
+            after = 1;
+        acc &= (uint32)((data & (BBN_EXEC|BBN_WRITE|BBN_READ)) >> 16);
+
+        if (((data >> 34) & 03) == 0) {      /* Private page */
+            sim_debug(DEBUG_PAGER, &cpu_dev, "Private\n");
+            if (data & BBN_TRPPG) {
+                sim_debug(DEBUG_PAGER, &cpu_dev, "Private not in core\n");
+                fault_data = grp | 0100000;
+                goto fault_bbn;
+            }
+            tlb_data = (uint32)(data & 03777);
+            break;
+        }
+
+        /* Shared and indirect pointers both go through the SPT. */
+        sim_interval--;
+        spt = M[020000 + ((data & BBN_SPT) >> 9)];
+        sim_debug(DEBUG_PAGER, &cpu_dev, "spt %05llo data %012llo\n",
+                  (data & BBN_SPT) >> 9, spt);
+
+        if (((data >> 34) & 03) == 1) {      /* Shared page */
+            sim_debug(DEBUG_PAGER, &cpu_dev, "Shared\n");
+            if (spt & BBN_TRPPG) {
+                sim_debug(DEBUG_PAGER, &cpu_dev, "Shared not in core\n");
+                fault_data = (lvl != 0) ? 0204000 : 0240000;
+                goto fault_bbn;
+            }
+            tlb_data = (uint32)(spt & 03777);
+            break;
+        }
+
+        /* Indirect page */
+        sim_debug(DEBUG_PAGER, &cpu_dev, "Indirect\n");
+        if (lvl == 2) {
+            fault_data =  0201000;
+            goto fault_bbn;
+        }
+        if (spt & BBN_TRPPG) {
+            sim_debug(DEBUG_PAGER, &cpu_dev, "Page table not in core\n");
+            fault_data = (lvl != 0) ? 0202000 : 0220000;
+            goto fault_bbn;
+        }
+        base = (int)(spt & 03777) << 9;
+        map = (int)(data & BBN_PN);
+        lvl++;
     }
+
+    grp = (lvl != 0) ? 0600000 : 0400000;
+    if (wr && (acc & 0200000) == 0) {
+        sim_debug(DEBUG_PAGER, &cpu_dev, "Illegal write\n");
+        fault_data = grp | 0002000;
+        goto fault_bbn;
+    }
+    if ((!fetch && !wr && (acc & 0400000) == 0) ||
+        (fetch && (acc & 0100000) == 0)) {
+        sim_debug(DEBUG_PAGER, &cpu_dev, "Illegal read or execute\n");
+        fault_data = grp | 0004000;
+        goto fault_bbn;
+    }
+
+    /* Core status table.  An age with the three high bits zero means
+       the core manager is working on the page. */
+    sim_interval--;
+    cst = M[04000 + tlb_data];
+    if ((cst & 00700000000000LL) == 0) {
+        sim_debug(DEBUG_PAGER, &cpu_dev, "CST age trap %012llo\n", cst);
+        fault_data = 0100000 >> ((cst >> 31) & 03);
+        goto fault_bbn;
+    }
+    cst &= ~00777000000000LL; /* Age is replaced, */
+    cst |= pur;               /* process use bits are ORed in, */
+    if (wr)
+        cst |= 00000400000000LL; /* and so is the write request. */
+    M[04000 + tlb_data] = cst;
+
+    /* Write permit only if writing now, or the page is already modified. */
+    if ((cst & 00000400000000LL) == 0)
+        acc &= ~0200000;
+    tlb_data |= acc;
     if (uf) {
         u_tlb[page] = tlb_data;
     } else {
         e_tlb[page] = tlb_data;
     }
-    /* Handle traps */
-    if (wr && (traps & BBN_TRPMOD)) {
-        sim_debug(DEBUG_PAGER, &cpu_dev, "wr && (traps & BBN_TRPMOD)\n");
-        fault_data = ((lvl != 0)? 0200000: 0)  | 0440000;
+    *loc = ((tlb_data & 03777) << 9) + (addr & 0777);
+    if (after) {
+        sim_debug(DEBUG_PAGER, &cpu_dev, "After-loading trap\n");
+        fault_data = 0004000;
         goto fault_bbn;
     }
-    if ((traps & BBN_TRPUSR)) {
-        sim_debug(DEBUG_PAGER, &cpu_dev, "traps & BBN_TRPUSR\n");
-        fault_data = ((lvl != 0)? 0200000: 0)  | 0420000;
-        goto fault_bbn;
-    }
-    if ((traps & BBN_ACC) == 0 || (traps & BBN_TRP)) {
-        if ((traps & BBN_ACC) == 0)
-          sim_debug(DEBUG_PAGER, &cpu_dev, "(traps & BBN_ACC) == 0\n");
-        if (traps & BBN_TRP)
-          sim_debug(DEBUG_PAGER, &cpu_dev, "traps & BBN_TRP\n");
-        fault_data = ((lvl != 0)? 0200000: 0)  | 0410000;
-        goto fault_bbn;
-    }
-    /* Update CST */
-    sim_interval--;
-    data = M[04000 + (tlb_data & 03777)];
-    if ((data & 00700000000000LL) == 0) {
-        sim_debug(DEBUG_PAGER, &cpu_dev, "(data & 00700000000000LL) == 0\n");
-        fault_data = 0100000 >> ((data >> 31) & 03);
-        goto fault_bbn;
-    }
-    data &= ~00777000000000LL; /* Clear age */
-    if (wr)
-       data |= 00000400000000LL; /* Set modify */
-    data |= pur;
-    M[04000 + (tlb_data & 03777)] = data;
-    goto access;
+    return 1;
       /* Handle fault */
 fault_bbn:
     sim_debug(DEBUG_PAGER, &cpu_dev, "Fault\n");
