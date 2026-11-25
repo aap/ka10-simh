@@ -76,6 +76,7 @@ MTAB cty_mod[] = {
 
 REG cty_reg[] = {
     { HRDATAD (WRU, sim_int_char, 8, "interrupt character") },
+    { DRDATAD (TIME, cty_unit[0].wait, 24, "output character delay"), PV_LEFT },
     { 0 }
     };
 
