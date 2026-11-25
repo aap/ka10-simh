@@ -70,7 +70,7 @@ DSKWDA==6B22            ; .. WRITE
 
 #define TF_DEVNUM   0700
 #define TF_NAME     "TF"
-#define NUM_UNITS   4
+#define NUM_UNITS   8
 
 /* Disk pack geometry. */
 #define SECTOR_SIZE         64
