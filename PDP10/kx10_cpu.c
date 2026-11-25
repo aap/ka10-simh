@@ -3954,7 +3954,9 @@ fault_bbn:
     /* Bit 10 = non-ex-mem       0000200 */
     /* Bit  9 = Parity           0000400 */
     /* Bit 0-8 = status */
-    if ((FLAGS & USER) == 0)
+    /* Exec mode bit: the map the reference went through, which for a
+       forced reference to user space is not the mode of the processor. */
+    if (!uf)
        fault_data |= 01;
     if (fetch)
        fault_data |= 02;
