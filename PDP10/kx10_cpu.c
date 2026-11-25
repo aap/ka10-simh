@@ -6446,6 +6446,11 @@ dpnorm:
                          FLAGS &= ~EXJSYS;
                       FLAGS &= ~USER;
                    }
+                   /* A JSYS executed as a pager trap, interrupt or UUO trap
+                      instruction runs in exec mode whatever was interrupted;
+                      the old flags are in the word it stores. */
+                   if (pi_cycle || uuo_cycle)
+                      FLAGS &= ~USER;
                    if (Mem_read(0, 0, 0, 0)) {
                        FLAGS = (uint32)(BR >> 23); /* On error restore flags */
                        goto last;
