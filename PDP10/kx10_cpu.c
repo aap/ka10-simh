@@ -4037,8 +4037,15 @@ int Mem_read_bbn(int flag, int cur_context, int fetch, int mod) {
         UPDATE_MI(AB);
         return 0;
     }
-    if (!page_lookup_bbn(AB, flag, &addr, mod, cur_context, fetch))
+    if (!page_lookup_bbn(AB, flag, &addr, mod, cur_context, fetch)) {
+        /* The read half of a read-pause-write cycle asks for both read
+           and write.  The trap status must say so: for a trap on a
+           plain write TENEX stores the saved write data itself before
+           it resumes, and here there is no data yet. */
+        if (mod && page_fault)
+            M[mon_base_reg | 0571] |= 010LL << 18;
         return 1;
+    }
     if (addr < 020) {
         MB = get_reg(AB);
         if (fetch == 0 && hst_lnt) {
