@@ -1095,7 +1095,7 @@ t_stat imp_devio(uint32 dev, uint64 *data)
         imp_data.obits = (uptr->STATUS & IMPO32) ? 32 : 36;
         sim_debug(DEBUG_DATAIO, dptr, "IMP %03o DATO %012llo %d %08x PC=%o\n",
                  dev, *data, imp_data.obits, (uint32)(*data >> 4), PC);
-        sim_activate(uptr, 100);
+        sim_activate_abs(uptr, 100);
         break;
     case DATAI:
         *data = imp_data.ibuf;
@@ -1107,7 +1107,7 @@ t_stat imp_devio(uint32 dev, uint64 *data)
                  dev, *data, (uint32)(*data >> 4), PC);
         if (uptr->ILEN != 0)
             uptr->STATUS |= IMPIB;
-        sim_activate(uptr, 100);
+        sim_activate_abs(uptr, 100);
         break;
     }
 
@@ -1344,7 +1344,7 @@ t_stat imp_srv(UNIT * uptr)
        host is idle. */
     if ((uptr->flags & (UNIT_NCP|UNIT_ATT)) == (UNIT_NCP|UNIT_ATT) &&
         !sim_is_active(uptr))
-        sim_activate(uptr, 1000);
+        sim_clock_coschedule(uptr, tmxr_poll);   /* With the clock, so the CPU can idle. */
     return SCPE_OK;
 }
 
@@ -1538,8 +1538,7 @@ imp_receive_udp (DEVICE *dev, struct imp_device *imp)
     imp_unit[0].IPOS = 0;
     imp_unit[0].ILEN = 8*imp->rpos;
     imp->rpos = 0;
-    if (!sim_is_active(&imp_unit[0]))
-        sim_activate(&imp_unit[0], 100);
+    sim_activate_abs(&imp_unit[0], 100);
     return;
 }
 
