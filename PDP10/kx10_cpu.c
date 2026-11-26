@@ -5071,6 +5071,15 @@ st_pi:
            (uuo_cycle && (IR & 0740) == 0 && IA == 041))) {
        sim_idle (TMR_RTC, FALSE);
     }
+#if BBN
+    /* TENEX: when no process wants to run, the scheduler goes round its
+       loop and counts in AC 0 "for people watching lights"; the pass ends
+       with AOJA 0,SCH0 (SCHED.MAC, BKGND2).  No other place in the monitor
+       uses AC 0 that way, so that instruction in exec mode is the idle
+       loop. */
+    if (sim_idle_enab && QBBN && (FLAGS & USER) == 0 && IR == 0344 && AC == 0)
+       sim_idle (TMR_RTC, FALSE);
+#endif
 
     /* Update history */
     if (hst_lnt) {
