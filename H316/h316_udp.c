@@ -318,7 +318,14 @@ t_stat udp_send (DEVICE *dptr, int32 link, uint16 *pdata, uint16 count)
 
   // Send it and we're outta here ...
   iret = tmxr_put_packet_ln (&udp_lines[link], (const uint8 *)&pkt, (size_t)pktlen);
-  if (iret != SCPE_OK) return sim_messagef(iret, "UDP%d - tmxr_put_packet_ln() failed with error %s\n", link, sim_error_text(iret));
+  //   A UDP link has no carrier: when nobody listens at the other end the
+  // socket reports "connection refused" on a later call.  That is a host or
+  // a neighbour that is switched off, not a broken interface, so the packet
+  // is simply lost and the link stays up for when the other end appears.
+  if (iret != SCPE_OK) {
+    sim_debug(IMP_DBG_UDP, dptr, "link %d - packet not sent (%s)\n", link, sim_error_text(iret));
+    return SCPE_OK;
+  }
   sim_debug(IMP_DBG_UDP, dptr, "link %d - packet sent (sequence=%d, length=%d)\n", link, ntohl(pkt.sequence), ntohs(pkt.count));
   return SCPE_OK;
 }
@@ -351,10 +358,7 @@ int32 udp_receive_packet (int32 link, UDP_PACKET *ppkt)
   tmxr_poll_rx (&udp_tmxr);
   ret = tmxr_get_packet_ln (&udp_lines[link], &pbuf, &pktsiz);
   udp_lines[link].rcve = FALSE;          // Disable receiver
-  if (ret != SCPE_OK) {
-    sim_messagef (ret, "UDP%d - tmxr_get_packet_ln() failed with error %s\n", link, sim_error_text(ret));
-    return NOLINK;
-  }
+  if (ret != SCPE_OK) return 0;        // See udp_send(): nobody there, no packet.
   if (pbuf == NULL) return 0;
   // Got a packet, so copy it to the packet buffer
   memcpy (ppkt, pbuf, pktsiz);
