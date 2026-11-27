@@ -12247,6 +12247,27 @@ last:
     if (QBBN && page_fault) {
         sim_debug(DEBUG_PAGER, &cpu_dev, "Trap\n");
         page_fault = 0;
+        /* A trap on the write cycle of a plain store comes when the
+           instruction is over: the pager has kept the data (location 572),
+           the PC points to the next instruction, and TENEX does the store
+           itself before it resumes (PGUNTP).  It tells its own two stores
+           by that PC (PGRT4: PGMV1+1, PGMV2+1); with the PC of the store
+           itself a second trap there was taken for a recursive one, and
+           the monitor went round for ever.  Other instructions that end
+           with a write are still restarted. */
+        if (!pi_cycle && !uuo_cycle && !f_pc_inh &&
+            ((M[mon_base_reg | 0571] >> 18) & 016) == 04) {
+            switch (IR) {
+            case 0102:              /* UMOVEM */
+                if ((FLAGS & USER) != 0)
+                    break;
+                /* Fall through */
+            case 0202: case 0206: case 0212: case 0216:  /* MOVEM, MOVSM, MOVNM, MOVMM */
+            case 0402: case 0426: case 0452: case 0476:  /* SETZM, SETAM, SETCAM, SETOM */
+                PC = (PC + 1) & RMASK;
+                break;
+            }
+        }
         /* The trap instruction is not part of the XCT that faulted. */
         xct_flag = 0;
         BYF5 = 0;
