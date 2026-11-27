@@ -1,4 +1,4 @@
-/* ka10_sa10.c: Systems Concepts SA-10 subsystem adapter
+/* ka10_sa10.c: Systems Concepts SA-10 subsystem adapter, with 3330 disks
 
    Copyright (c) 2026, aap
 
@@ -31,9 +31,21 @@
    software (0 ending, 1 initial selection, 2 asynchronous, 3 dummy); the
    User's Manual has 0 and 1 swapped.
 
-   Device SA: the adapter, four channel units (events only), BASE register
-   (low-core block, 160 on BBN System C: base+4n = channel n start word,
-   +1/+2 = status words, +3 = used by channel).  No control units yet.
+   Devices:
+     SA    the adapter: four channel units (events only), BASE register
+           (low-core block, 160 on BBN System C: base+4n = channel n start
+           word, +1/+2 = status words, +3 = used by channel)
+     SAD   eight 3330-1 drives on one control unit, channel CHAN (0),
+           device addresses ADDR+unit (300-307).
+
+   Disk images: a 3330-1 pack of 411 cylinders x 19 heads, formatted the
+   way TENEX formats it: records R1-R5 of key length 0 and data length 2304
+   bytes (one 512-word page in SA-10 WORD mode) on every track.  The image
+   holds only the data areas, in cylinder, head, record order, as the bytes
+   the channel sends and receives (WORD mode: 9 bytes for 2 words), so a
+   record is at ((cyl * 19 + head) * 5 + R - 1) * 2304.  Count fields
+   (CC CC HH HH R 00 09 00), home address and R0 (8 bytes of zero) are
+   implied.  Every file, also a new empty one, is a formatted pack.
 */
 
 #include "kx10_defs.h"
@@ -968,27 +980,483 @@ static const char *sa_description(DEVICE *dptr)
     return "Systems Concepts SA-10 subsystem adapter";
 }
 
+#define SAD_UNITS   8
+
+/* ---- 3330 disks ---- */
+
+#define D_CYL        411
+#define D_HEADS      19
+#define D_RECS       5
+#define D_RECLEN     2304
+#define D_TRACK      (D_RECS * D_RECLEN)
+#define D_PACK       ((t_addr)D_CYL * D_HEADS * D_TRACK)
+
+/* Unit fields */
+#define CYL     u3      /* cylinder */
+#define HEAD    u4      /* head */
+#define POS     u5      /* rotational position: next record under the head, 0 = R0 */
+#define ORIENT  u6      /* record of the last successful search, 0 = none (-1 = HA) */
+#define pend    us9     /* pending asynchronous status */
+#define idx     us10    /* index points passed while searching */
+
+static uint8 sad_sense[SAD_UNITS][24];
+static int32 sad_chan = 0;
+static int32 sad_addr = 0300;
+static int32 sad_seek = 300;    /* instructions for a seek with arm motion */
+static int sad_last[SAD_UNITS]; /* last command, for chaining checks */
+
+static t_stat sad_svc(UNIT *);
+static t_stat sad_reset(DEVICE *);
+static t_stat sad_attach(UNIT *, CONST char *);
+static t_stat sad_detach(UNIT *);
+static t_stat sad_help(FILE *, DEVICE *, UNIT *, int32, const char *);
+static const char *sad_description(DEVICE *);
+static int sad_cmd(UNIT *uptr, int cmd, uint8 *buf, int *len, int write);
+
+
+UNIT sad_unit[SAD_UNITS] = {
+    { UDATA (&sad_svc, UNIT_FIX+UNIT_ATTABLE+UNIT_DISABLE+UNIT_ROABLE, D_PACK) },
+    { UDATA (&sad_svc, UNIT_FIX+UNIT_ATTABLE+UNIT_DISABLE+UNIT_ROABLE, D_PACK) },
+    { UDATA (&sad_svc, UNIT_FIX+UNIT_ATTABLE+UNIT_DISABLE+UNIT_ROABLE, D_PACK) },
+    { UDATA (&sad_svc, UNIT_FIX+UNIT_ATTABLE+UNIT_DISABLE+UNIT_ROABLE, D_PACK) },
+    { UDATA (&sad_svc, UNIT_FIX+UNIT_ATTABLE+UNIT_DISABLE+UNIT_ROABLE, D_PACK) },
+    { UDATA (&sad_svc, UNIT_FIX+UNIT_ATTABLE+UNIT_DISABLE+UNIT_ROABLE, D_PACK) },
+    { UDATA (&sad_svc, UNIT_FIX+UNIT_ATTABLE+UNIT_DISABLE+UNIT_ROABLE, D_PACK) },
+    { UDATA (&sad_svc, UNIT_FIX+UNIT_ATTABLE+UNIT_DISABLE+UNIT_ROABLE, D_PACK) },
+};
+
+REG sad_reg[] = {
+    { DRDATAD (CHAN, sad_chan, 2, "SA-10 channel of the control unit") },
+    { ORDATAD (ADDR, sad_addr, 8, "device address of unit 0") },
+    { DRDATAD (SEEK, sad_seek, 24, "instructions for a seek with arm motion") },
+    { 0 }
+};
+
+MTAB sad_mod[] = {
+    { 0 }
+};
+
+DEVICE sad_dev = {
+    "SAD", sad_unit, sad_reg, sad_mod,
+    SAD_UNITS, 8, 27, 1, 8, 8,
+    NULL, NULL, &sad_reset, NULL, &sad_attach, &sad_detach,
+    NULL, DEV_DISABLE | DEV_DEBUG | DEV_DIS, 0, sa_debug,
+    NULL, NULL, &sad_help, NULL, NULL, &sad_description
+};
+
+
 /* ---- control unit interface ---- */
 
-/* No control units yet: every device address gives a select error. */
+/* System Reset on channel ch. */
 static void sa_cu_reset(int ch)
 {
+    int u;
+    if (ch == sad_chan)
+        for (u = 0; u < SAD_UNITS; u++) {
+            sad_unit[u].pend = 0;
+            sad_unit[u].ORIENT = 0;
+            sad_last[u] = 0;
+            memset(sad_sense[u], 0, 24);
+            /* An arm in motion still gets there, but without status. */
+            sim_cancel(&sad_unit[u]);
+        }
 }
 
+/* Pending asynchronous status of device dev (-1: of any device) on
+   channel ch; the device forgets it.  Returns 0 if there is none. */
 static int sa_cu_async(int ch, int dev, int *devp)
 {
+    int u, st;
+    if (ch != sad_chan)
+        return 0;
+    for (u = 0; u < SAD_UNITS; u++) {
+        if (dev >= 0 && dev != sad_addr + u)
+            continue;
+        st = sad_unit[u].pend;
+        if (st) {
+            sad_unit[u].pend = 0;
+            *devp = sad_addr + u;
+            return st;
+        }
+    }
     return 0;
 }
 
+/* Find the unit for a device address on channel ch. */
 static UNIT *sa_find(int ch, int dev)
 {
+    int u = dev - sad_addr;
+    if (ch == sad_chan && u >= 0 && u < SAD_UNITS &&
+        (sad_dev.flags & DEV_DIS) == 0 && (sad_unit[u].flags & UNIT_DIS) == 0)
+        return &sad_unit[u];
     return NULL;
 }
 
 static int sa_cu_cmd(UNIT *uptr, int cmd, uint8 *buf, int *len, int write)
 {
-    *len = 0;
-    return US_UC|US_INIT;
+    return sad_cmd(uptr, cmd, buf, len, write);
+}
+
+/* ---- 3330 drives ---- */
+
+/* Rotational sector of the start of record r (r = 0 for R0), in the
+   units of SET SECTOR (128 per revolution), as DSKPAK computes them. */
+static int sad_sector(int r)
+{
+    if (r == 0)
+        return 0;
+    return 128 * (237 + D_RECLEN * (r - 1)) / 13440;
+}
+
+static void sad_check(UNIT *uptr, int b0, int b1)
+{
+    int u = (int)(uptr - sad_unit);
+    static const uint8 phad[8] = { 070, 061, 052, 043, 034, 025, 016, 007 };
+    memset(sad_sense[u], 0, 24);
+    sad_sense[u][0] = (uint8)b0;
+    sad_sense[u][1] = (uint8)b1;
+    sad_sense[u][4] = phad[u];
+    sim_debug(DEBUG_EXP, &sad_dev, "SAD%d unit check, sense %02x %02x\n", u, b0, b1);
+}
+
+static t_addr sad_da(UNIT *uptr, int r)
+{
+    return (((t_addr)uptr->CYL * D_HEADS + uptr->HEAD) * D_RECS + r - 1) * D_RECLEN;
+}
+
+static void sad_read(UNIT *uptr, int r, uint8 *buf)
+{
+    size_t n = 0;
+    memset(buf, 0, D_RECLEN);
+    if (sim_fseek(uptr->fileref, sad_da(uptr, r), SEEK_SET) == 0)
+        n = sim_fread(buf, 1, D_RECLEN, uptr->fileref);
+    (void)n;
+}
+
+static void sad_write(UNIT *uptr, int r, uint8 *buf)
+{
+    (void)sim_fseek(uptr->fileref, sad_da(uptr, r), SEEK_SET);
+    (void)sim_fwrite(buf, 1, D_RECLEN, uptr->fileref);
+}
+
+/* Next record comes under the head. */
+static int sad_next(UNIT *uptr)
+{
+    int r = uptr->POS;
+    uptr->POS = (r + 1) % (D_RECS + 1);
+    if (uptr->POS == 0)
+        uptr->idx++;
+    return r;
+}
+
+/* Execute a command.  write: buf holds *len bytes from the channel, set
+   *len to the number the command takes.  Read: fill buf, set *len.
+   Returns unit status, with US_INIT for a rejection at initial selection. */
+static int sad_cmd(UNIT *uptr, int cmd, uint8 *buf, int *len, int write)
+{
+    int u = (int)(uptr - sad_unit);
+    int have = *len, prev = sad_last[u], r, c, h;
+    int oriented = uptr->ORIENT;
+
+    sad_last[u] = cmd;
+    if (cmd != 0x31 && cmd != 0xB1 && cmd != 0x39 && cmd != 0xB9)
+        uptr->ORIENT = 0;
+    if (cmd != 0x04)
+        memset(sad_sense[u], 0, 24);
+    sim_debug(DEBUG_CMD, &sad_dev, "SAD%d cmd %02x cyl %d head %d pos %d (%d bytes)\n",
+              u, cmd, uptr->CYL, uptr->HEAD, uptr->POS, have);
+
+    if (cmd == 0x04) {                  /* SENSE */
+        memcpy(buf, sad_sense[u], 24);
+        if ((uptr->flags & UNIT_ATT) == 0 && buf[0] == 0)
+            buf[0] = 0x40;
+        memset(sad_sense[u], 0, 24);
+        *len = 24;
+        return US_CE|US_DE;
+    }
+    if ((uptr->flags & UNIT_ATT) == 0) {
+        sad_check(uptr, 0x40, 0);       /* intervention required */
+        *len = 0;
+        return US_UC|US_INIT;
+    }
+    if (sim_is_active(uptr) && cmd != 0x03) {
+        /* Seek in progress. */
+        *len = 0;
+        return US_BUSY|US_INIT;
+    }
+
+    switch (cmd) {
+    case 0x03:                          /* NO-OP */
+    case 0x17:                          /* RELEASE */
+    case 0x87:                          /* RESERVE (unconditional) */
+    case 0x94:                          /* RELEASE */
+    case 0xB4:                          /* RESERVE */
+        *len = 0;
+        return US_CE|US_DE;
+
+    case 0x07:                          /* SEEK */
+    case 0x0B:                          /* SEEK CYLINDER */
+    case 0x1B:                          /* SEEK HEAD */
+        *len = 6;
+        if (have < 6 || buf[0] || buf[1]) {
+            sad_check(uptr, 0x80, 0);
+            return US_CE|US_DE|US_UC;
+        }
+        c = (buf[2] << 8) | buf[3];
+        h = (buf[4] << 8) | buf[5];
+        if (cmd == 0x1B)
+            c = uptr->CYL;
+        if (c >= D_CYL || h >= D_HEADS) {
+            sad_check(uptr, 0x80, 0);
+            return US_CE|US_DE|US_UC;
+        }
+        uptr->HEAD = h;
+        uptr->idx = 0;
+        if (c != uptr->CYL) {
+            /* Arm motion: channel end now, device end when there. */
+            uptr->CYL = c;
+            sim_activate(uptr, sad_seek);
+            return US_CE;
+        }
+        return US_CE|US_DE;
+
+    case 0x13:                          /* RECALIBRATE */
+        *len = 0;
+        uptr->CYL = 0; uptr->HEAD = 0; uptr->idx = 0;
+        sim_activate(uptr, sad_seek);
+        return US_CE;
+
+    case 0x1F:                          /* SET FILE MASK */
+        *len = 1;
+        return US_CE|US_DE;
+
+    case 0x23:                          /* SET SECTOR */
+        *len = 1;
+        if (have < 1) {
+            sad_check(uptr, 0x80, 0);
+            return US_CE|US_DE|US_UC;
+        }
+        for (r = 0; r <= D_RECS && sad_sector(r) < buf[0]; r++)
+            ;
+        if (r > D_RECS) {
+            r = 0;
+            uptr->idx++;
+        }
+        uptr->POS = r;
+        uptr->idx = 0;
+        return US_CE|US_DE;
+
+    case 0x31: case 0xB1:               /* SEARCH ID EQUAL (multitrack) */
+        *len = 5;
+        if (have < 5) {
+            sad_check(uptr, 0x80, 0);
+            return US_CE|US_DE|US_UC;
+        }
+        if (prev != 0x31 && prev != 0xB1)
+            uptr->idx = 0;
+        if (uptr->idx >= 2) {
+            sad_check(uptr, 0, 0x08);   /* no record found */
+            uptr->idx = 0;
+            return US_CE|US_DE|US_UC;
+        }
+        r = sad_next(uptr);
+        c = (buf[0] << 8) | buf[1];
+        h = (buf[2] << 8) | buf[3];
+        sim_debug(DEBUG_DETAIL, &sad_dev, "SAD%d search %d/%d/%d at R%d\n",
+                  u, c, h, buf[4], r);
+        if (c == uptr->CYL && h == uptr->HEAD && buf[4] == r) {
+            uptr->ORIENT = r == 0 ? -2 : r;
+            return US_CE|US_DE|US_SM;
+        }
+        uptr->ORIENT = 0;
+        return US_CE|US_DE;
+
+    case 0x39: case 0xB9:               /* SEARCH HA EQUAL */
+        *len = 4;
+        c = have >= 4 ? (buf[0] << 8) | buf[1] : -1;
+        h = have >= 4 ? (buf[2] << 8) | buf[3] : -1;
+        uptr->POS = 0;                  /* wait for the index point */
+        if (c == uptr->CYL && h == uptr->HEAD) {
+            uptr->ORIENT = -1;
+            return US_CE|US_DE|US_SM;
+        }
+        return US_CE|US_DE;
+
+    case 0x02:                          /* READ IPL */
+        uptr->CYL = 0; uptr->HEAD = 0; uptr->POS = 1;
+        /* fall through */
+    case 0x06:                          /* READ DATA */
+    case 0x1E:                          /* READ COUNT KEY DATA */
+    case 0x12:                          /* READ COUNT */
+        if (oriented > 0 && (prev == 0x31 || prev == 0xB1))
+            r = oriented;
+        else if (oriented == -2 && cmd != 0x12) {
+            /* data of R0: eight bytes of zero */
+            memset(buf, 0, 8);
+            *len = 8;
+            uptr->POS = 1;
+            return US_CE|US_DE;
+        } else {
+            r = sad_next(uptr);
+            if (r == 0 && cmd != 0x12 && cmd != 0x1E)
+                r = sad_next(uptr);
+        }
+        if (r == 0) {
+            /* count of R0 */
+            buf[0] = (uint8)(uptr->CYL >> 8); buf[1] = (uint8)uptr->CYL;
+            buf[2] = 0; buf[3] = (uint8)uptr->HEAD; buf[4] = 0;
+            buf[5] = 0; buf[6] = 0; buf[7] = 8;
+            *len = 8;
+            if (cmd == 0x1E) {
+                memset(buf + 8, 0, 8);
+                *len = 16;
+            }
+            return US_CE|US_DE;
+        }
+        uptr->POS = (r + 1) % (D_RECS + 1);
+        c = 0;
+        if (cmd == 0x12 || cmd == 0x1E) {
+            buf[0] = (uint8)(uptr->CYL >> 8); buf[1] = (uint8)uptr->CYL;
+            buf[2] = 0; buf[3] = (uint8)uptr->HEAD; buf[4] = (uint8)r;
+            buf[5] = 0; buf[6] = D_RECLEN >> 8; buf[7] = D_RECLEN & 0377;
+            c = 8;
+        }
+        if (cmd != 0x12)
+            sad_read(uptr, r, buf + c);
+        *len = c + (cmd == 0x12 ? 0 : D_RECLEN);
+        sim_debug(DEBUG_DETAIL, &sad_dev, "SAD%d read %d/%d/R%d\n",
+                  u, uptr->CYL, uptr->HEAD, r);
+        return US_CE|US_DE;
+
+    case 0x1A:                          /* READ HOME ADDRESS */
+        buf[0] = 0; buf[1] = (uint8)(uptr->CYL >> 8); buf[2] = (uint8)uptr->CYL;
+        buf[3] = 0; buf[4] = (uint8)uptr->HEAD;
+        *len = 5;
+        uptr->POS = 0;
+        return US_CE|US_DE;
+
+    case 0x05:                          /* WRITE DATA */
+        *len = D_RECLEN;
+        if (uptr->flags & UNIT_RO) {
+            *len = 0;
+            sad_check(uptr, 0x80, 0x02);    /* reject, write inhibited */
+            return US_UC|US_INIT;
+        }
+        if (!(oriented > 0 && (prev == 0x31 || prev == 0xB1))) {
+            *len = 0;
+            sad_check(uptr, 0x80, 0);
+            return US_UC|US_INIT;
+        }
+        if (have < D_RECLEN)
+            memset(buf + have, 0, D_RECLEN - have);
+        sad_write(uptr, oriented, buf);
+        uptr->POS = (oriented + 1) % (D_RECS + 1);
+        sim_debug(DEBUG_DETAIL, &sad_dev, "SAD%d write %d/%d/R%d\n",
+                  u, uptr->CYL, uptr->HEAD, oriented);
+        return US_CE|US_DE;
+
+    case 0x19:                          /* WRITE HOME ADDRESS */
+    case 0x15:                          /* WRITE R0 */
+        /* The formatter's HA and R0: the format is fixed, accept them. */
+        *len = cmd == 0x19 ? 5 : 16;
+        if (uptr->flags & UNIT_RO) {
+            *len = 0;
+            sad_check(uptr, 0x80, 0x02);
+            return US_UC|US_INIT;
+        }
+        uptr->POS = 1;
+        return US_CE|US_DE;
+
+    case 0x1D:                          /* WRITE COUNT KEY DATA */
+        *len = 8 + D_RECLEN;
+        if (uptr->flags & UNIT_RO) {
+            *len = 0;
+            sad_check(uptr, 0x80, 0x02);
+            return US_UC|US_INIT;
+        }
+        r = uptr->POS == 0 ? 1 : uptr->POS;
+        if (have < 8 || buf[4] != r || buf[5] != 0 ||
+            ((buf[6] << 8) | buf[7]) != D_RECLEN ||
+            ((buf[0] << 8) | buf[1]) != uptr->CYL || ((buf[2] << 8) | buf[3]) != uptr->HEAD) {
+            /* Only TENEX's format can be written. */
+            *len = 0;
+            sad_check(uptr, 0x80, 0x40);
+            return US_UC|US_INIT;
+        }
+        if (have < 8 + D_RECLEN)
+            memset(buf + have, 0, 8 + D_RECLEN - have);
+        sad_write(uptr, r, buf + 8);
+        uptr->POS = (r + 1) % (D_RECS + 1);
+        return US_CE|US_DE;
+
+    default:
+        *len = 0;
+        sad_check(uptr, 0x80, 0);       /* command reject */
+        return US_UC|US_INIT;
+    }
+}
+
+/* Seek complete: device end. */
+static t_stat sad_svc(UNIT *uptr)
+{
+    sim_debug(DEBUG_DETAIL, &sad_dev, "SAD%d seek done, cyl %d\n",
+              (int)(uptr - sad_unit), uptr->CYL);
+    uptr->pend |= US_DE;
+    sa_kick(sad_chan, sa_wait);
+    return SCPE_OK;
+}
+
+static t_stat sad_reset(DEVICE *dptr)
+{
+    int u;
+    for (u = 0; u < SAD_UNITS; u++) {
+        sad_unit[u].pend = 0;
+        sad_unit[u].ORIENT = 0;
+        sim_cancel(&sad_unit[u]);
+    }
+    return SCPE_OK;
+}
+
+static t_stat sad_attach(UNIT *uptr, CONST char *cptr)
+{
+    t_stat r;
+    t_offset sz;
+    r = attach_unit(uptr, cptr);
+    if (r != SCPE_OK)
+        return r;
+    uptr->CYL = 0; uptr->HEAD = 0; uptr->POS = 0; uptr->ORIENT = 0;
+    sz = sim_fsize_ex(uptr->fileref);
+    if (sz == 0 && !sim_quiet)
+        sim_messagef(SCPE_OK, "%s: new 3330-1 pack: %d cylinders, %d heads, "
+                     "R1-R%d of %d bytes on every track\n",
+                     sim_uname(uptr), D_CYL, D_HEADS, D_RECS, D_RECLEN);
+    return SCPE_OK;
+}
+
+static t_stat sad_detach(UNIT *uptr)
+{
+    if (!(uptr->flags & UNIT_ATT))
+        return SCPE_OK;
+    sim_cancel(uptr);
+    return detach_unit(uptr);
+}
+
+static t_stat sad_help(FILE *st, DEVICE *dptr, UNIT *uptr, int32 flag, const char *cptr)
+{
+    fprintf(st, "%s\n\n", sad_description(dptr));
+    fprintf(st, "Eight drives on SA-10 channel CHAN (0), device addresses ADDR+n (300+n).\n");
+    fprintf(st, "A pack is formatted as BBN TENEX formats it: 411 cylinders, 19 heads,\n");
+    fprintf(st, "records R1-R5 of 2304 bytes (one page in SA-10 WORD mode) per track.\n");
+    fprintf(st, "The image file holds the record data in cylinder/head/record order;\n");
+    fprintf(st, "count fields, home address and R0 are implied.  An empty file is a\n");
+    fprintf(st, "freshly formatted pack.  ATTACH -R for a write-inhibited drive.\n\n");
+    fprint_reg_help(st, dptr);
+    return SCPE_OK;
+}
+
+static const char *sad_description(DEVICE *dptr)
+{
+    return "IBM 3330-1 disk drives on the SA-10";
 }
 
 #endif

@@ -514,6 +514,7 @@ extern DEVICE   pd_dev;
 extern DEVICE   pclk_dev;
 extern DEVICE   rti_dev;
 extern DEVICE   sa_dev;
+extern DEVICE   sad_dev;
 extern DEVICE   dpy_dev;
 extern DEVICE   iii_dev;
 extern DEVICE   dd_dev;
