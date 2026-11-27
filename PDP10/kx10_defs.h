@@ -513,6 +513,7 @@ extern DEVICE   dk_dev;
 extern DEVICE   pd_dev;
 extern DEVICE   pclk_dev;
 extern DEVICE   rti_dev;
+extern DEVICE   sa_dev;
 extern DEVICE   dpy_dev;
 extern DEVICE   iii_dev;
 extern DEVICE   dd_dev;
@@ -803,6 +804,7 @@ extern void ka10_lights_clear_aux (int);
 #define NUM_DEVS_PD     ITS
 #define NUM_DEVS_PCLK   WAITS
 #define NUM_DEVS_RTI    BBN
+#define NUM_DEVS_SA     BBN
 #define NUM_DEVS_IMX    ITS
 #define NUM_DEVS_STK    ITS
 #define NUM_DEVS_TK10   ITS
