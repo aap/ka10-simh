@@ -161,7 +161,11 @@ t_stat lpt_devio(uint32 dev, uint64 *data) {
          break;
 
     case DATAO:
-         if ((uptr->STATUS & DONE_FLG) != 0) {
+         /* The buffer is loaded whenever the printer is not busy; Done need
+            not be set.  TENEX starts each buffer with CONO LPT,pia (which
+            leaves Done clear here) and DATAO LPT,[0], and waits for the
+            interrupt. */
+         if ((uptr->STATUS & BUSY_FLG) == 0) {
              int i, j;
              for (j = 0, i = 29; i > 0; i-=7)
                  lpt_chbuf[j++] = ((uint8)(*data >> i)) & 0x7f;
