@@ -148,7 +148,8 @@ t_stat ctyo_svc (UNIT *uptr)
 
     if (uptr->DATA != 0) {
         ch = sim_tt_outcvt ( uptr->DATA, TT_GET_MODE (uptr->flags)) ;
-        if ((r = sim_putchar_s (ch)) != SCPE_OK) {   /* output; error? */
+        /* (a negative value means the mode drops this character) */
+        if (ch >= 0 && (r = sim_putchar_s (ch)) != SCPE_OK) {   /* output; error? */
             sim_activate (uptr, uptr->wait);               /* try again */
             return ((r == SCPE_STALL)? SCPE_OK: r);        /* !stall? report */
         }
