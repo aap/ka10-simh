@@ -965,11 +965,11 @@ t_stat dp_attach (UNIT *uptr, CONST char *cptr)
     if (dptr == 0)
         return SCPE_OK;
     dib = (DIB *) dptr->ctxt;
-    ctlr = dib->dev_num & 014;
+    ctlr = (dib->dev_num - DP_DEVNUM) >> 2;
     uptr->CUR_CYL = 0;
-    uptr->UFLAGS = (NO << 3) | SEEK_DONE | (ctlr >> 2);
+    uptr->UFLAGS = (NO << 3) | SEEK_DONE | ctlr;
     dp_df10[ctlr].status |= PI_ENABLE;
-    set_interrupt(DP_DEVNUM + (ctlr), dp_df10[ctlr].status);
+    set_interrupt(DP_DEVNUM + (ctlr << 2), dp_df10[ctlr].status);
     return SCPE_OK;
 }
 
