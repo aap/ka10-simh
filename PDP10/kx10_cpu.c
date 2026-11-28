@@ -8558,7 +8558,14 @@ mul_done:
 
           /* Branch */
     case 0250:  /* EXCH */ /* FAC|FCE */
-              if (Mem_read(0, 0, 0, 0))
+              /* On the KA10, as on the PDP-6, EXCH fetches with a
+                 read-pause-write cycle (FCE PSE): the BBN pager checks
+                 the write on the read and traps before anything is done.
+                 With a plain read the trap came on the write cycle, TENEX
+                 did the store from the saved write data (PGUNTP), and the
+                 restarted EXCH fetched that word back: the old contents
+                 of the location were lost. */
+              if (Mem_read(0, 0, 0, QBBN != 0))
                   goto last;
               AR = MB;
               MB = BR;
