@@ -4591,6 +4591,7 @@ int nlzero(uint64 w) {
  * XCT is set (Model 701 manual, figure 10-8); otherwise it is the current
  * context, as on other KA10 systems.
  */
+#if BBN
 #define BBN_BPTR_PREV   (QBBN && (xct_flag & 04) != 0 && (FLAGS & USER) == 0)
 static int bbn_bptr_read(int mod) {
     int r;
@@ -4599,6 +4600,10 @@ static int bbn_bptr_read(int mod) {
     bbn_bptr = 0;
     return r;
 }
+#else
+#define BBN_BPTR_PREV   0
+#define bbn_bptr_read(mod)  Mem_read(0, !QITS, 0, (mod))
+#endif
 
 t_stat sim_instr (void)
 {
