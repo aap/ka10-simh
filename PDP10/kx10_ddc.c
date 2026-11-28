@@ -270,6 +270,7 @@ t_stat ddc_svc (UNIT *uptr)
        ddc_cmdptr &= 0xf;
        if (ddc_cmdptr != ddc_putptr)
            sim_activate(uptr, 100);
+       return SCPE_OK;
    }
 
    if (uptr->POS == 0) {
@@ -302,7 +303,9 @@ t_stat ddc_svc (UNIT *uptr)
 
    if (uptr->POS == DDC10_WDS) {
 done:
-       if (func == 2) {
+       /* Function 1 is the write (memory to drum: the sector buffer was
+          filled from memory above), function 2 the read. */
+       if (func == 1) {
           int da;
           da = ((trk * 13) + sec) * DDC10_WDS;
           (void)sim_fseek(duptr->fileref, da * sizeof(uint64), SEEK_SET);
