@@ -199,6 +199,10 @@ static uint64 word(int pointer, int base)
 static void next(int pointer, int size)
 {
     uint64 modulo = M[tym_base + size] >> 4;
+    if (modulo == 0) {          /* No ring set up (yet, or any more). */
+        M[tym_base + pointer] = 0;
+        return;
+    }
     M[tym_base + pointer] = (M[tym_base + pointer] + 1) % modulo;
 }
 
@@ -214,6 +218,8 @@ static uint64 room (int h, int t, int s)
     uint64 head = M[tym_base + h];
     uint64 tail = M[tym_base + t];
     uint64 size = M[tym_base + s] >> 4;
+    if (size == 0)              /* No ring set up: no room. */
+        return 0;
     return size - (head - tail) % size;
 }
 
