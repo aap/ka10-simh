@@ -3298,7 +3298,6 @@ int Mem_read(int flag, int cur_context, int fetch, int mod) {
                 if (fetch == 0 && hst_lnt) {
                     hst[hst_p].mb = MB;
                 }
-                MB = get_reg(AB);
                 return 0;
             }
         }
