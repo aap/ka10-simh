@@ -627,8 +627,8 @@ t_stat dp_svc (UNIT *uptr)
            /* Cylinder, Surface, Sector all ok */
            if (BUF_EMPTY(uptr)) {
                  sim_debug(DEBUG_DETAIL, dptr,
-                       "DP %d cmd=%o cyl=%d (%o) sect=%d surf=%d %d\n",
-                        ctlr, uptr->UFLAGS, cyl, cyl, sect, surf,uptr->CUR_CYL);
+                       "DP %d unit=%d cmd=%o op=%o cyl=%d sect=%d surf=%d %d cda=%o\n",
+                        ctlr, (int)(uptr - dp_unit) % NUM_UNITS_DP, uptr->UFLAGS, cmd, cyl, sect, surf,uptr->CUR_CYL, df10->cda);
                 uptr->STATUS |= SRC_DONE;
                 if (uptr->STATUS & END_CYL) {
                      if (cmd == WR) {
