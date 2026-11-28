@@ -86,7 +86,8 @@
 
 /* Drum Status */
 #define DDC_PWB         0700000000000LL
-#define DDC_SECCNT      0017700000000LL    /* Sequence counter */
+#define DDC_SECCNT      0017760000000LL    /* Sector count, negative, bits 5-13 */
+#define DDC_SECONE      0000020000000LL    /* One in the sector count */
 #define DDC_ADDR        0000000777777LL
 
 /* DataI */
@@ -99,7 +100,8 @@
 
 #define DDC10_WDS       0200
 
-#define DDC_SIZE        (7000 * DDC10_WDS)
+#define DDC_NSEC        (13 * 4)           /* 128-word sectors per track */
+#define DDC_SIZE        (256 * DDC_NSEC * DDC10_WDS)
 
 uint64          ddc_buf[DDC10_WDS];
 uint64          ddc_cmd[16];
@@ -196,7 +198,7 @@ t_stat ddc_devio(uint32 dev, uint64 *data) {
      case DATAI:
          *data = (t_uint64)(uptr->SEC++);
          uptr->SEC &= 0177;
-         if (uptr->SEC > (13 << 2))
+         if (uptr->SEC >= DDC_NSEC)
             uptr->SEC = 0;
          if ((uptr->STATUS & DDC_DON) != 0)
             *data |= DDC_DONE;
@@ -248,7 +250,7 @@ t_stat ddc_svc (UNIT *uptr)
    UNIT         *duptr;
 
    dptr = &ddc_dev;
-   sec = (ddc_cmd[ddc_cmdptr] & DDC_SEC) >> 2;
+   sec = (ddc_cmd[ddc_cmdptr] & DDC_SEC);
    trk = (ddc_cmd[ddc_cmdptr] & DDC_TRK) >> 7;
    dsk = (ddc_cmd[ddc_cmdptr] & DDC_DISK) >> 17;
    func = (ddc_cmd[ddc_cmdptr] & DDC_FUNC) >> 19;
@@ -275,7 +277,7 @@ t_stat ddc_svc (UNIT *uptr)
 
    if (uptr->POS == 0) {
        int da;
-       da = ((trk * 13) + sec) * DDC10_WDS;
+       da = ((trk * DDC_NSEC) + sec) * DDC10_WDS;
        (void)sim_fseek(duptr->fileref, da * sizeof(uint64), SEEK_SET);
        wc = sim_fread (&ddc_buf[0], sizeof(uint64),
                     DDC10_WDS, duptr->fileref);
@@ -307,7 +309,7 @@ done:
           filled from memory above), function 2 the read. */
        if (func == 1) {
           int da;
-          da = ((trk * 13) + sec) * DDC10_WDS;
+          da = ((trk * DDC_NSEC) + sec) * DDC10_WDS;
           (void)sim_fseek(duptr->fileref, da * sizeof(uint64), SEEK_SET);
           wc = sim_fwrite (&ddc_buf[0], sizeof(uint64),
                        DDC10_WDS, duptr->fileref);
@@ -316,14 +318,14 @@ done:
        }
        sec ++;
        ddc_cmd[ddc_cmdptr] &= ~DDC_SEC;
-       ddc_cmd[ddc_cmdptr] |= (DDC_SEC & (sec << 2));
-       word += 0000100000000LL;
+       ddc_cmd[ddc_cmdptr] |= (DDC_SEC & sec);
+       word += DDC_SECONE;
        sim_debug(DEBUG_DETAIL, dptr, "DDC %d next sect %012llo %012llo\n", dsk, word, ddc_cmd[ddc_cmdptr]);
        if ((word & DDC_SECCNT) == 0) {
            ddc_cmd[ddc_cmdptr+1] = (word & (DDC_SECCNT|DDC_PWB)) | (adr & RMASK);
            uptr->STATUS |= DDC_DON;
            uptr->UFLAGS = seq;
-           uptr->SEC = sec << 2;
+           uptr->SEC = sec;
            sim_debug(DEBUG_DETAIL, dptr, "DDC %d Set done %d %d\n", dsk, pia, seq);
 
            set_interrupt(ddc_dib.dev_num, pia);
